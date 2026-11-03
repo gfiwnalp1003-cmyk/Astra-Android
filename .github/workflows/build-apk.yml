@@ -18,29 +18,22 @@ jobs:
         run: |
           set -e
 
-          if [ -f "Astra-Android-upload-ready.zip" ]; then
-            unzip -o Astra-Android-upload-ready.zip -d extracted
-          else
-            echo "ERROR: Astra-Android-upload-ready.zip not found"
-            exit 1
-          fi
+          unzip -o Astra-Android-upload-ready.zip -d extracted
 
-          echo "Searching for Gradle project..."
-          PROJECT_SETTINGS=$(find . -type f \( \
+          PROJECT_SETTINGS=$(find extracted -type f \( \
             -name "settings.gradle" -o \
             -name "settings.gradle.kts" \
-          \) -not -path "./.git/*" | head -n 1)
+          \) | head -n 1)
 
           if [ -z "$PROJECT_SETTINGS" ]; then
-            echo "ERROR: settings.gradle(.kts) not found"
-            echo "Files found:"
-            find . -maxdepth 4 -type f | head -100
+            echo "ERROR: Gradle settings file not found"
+            find extracted -maxdepth 5 -type f
             exit 1
           fi
 
           PROJECT_DIR=$(dirname "$PROJECT_SETTINGS")
-          echo "Project directory: $PROJECT_DIR"
           echo "PROJECT_DIR=$PROJECT_DIR" >> "$GITHUB_ENV"
+          echo "Found project: $PROJECT_DIR"
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -71,14 +64,58 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Configure Maven fallback
+        shell: bash
+        run: |
+          mkdir -p "$HOME/.gradle"
+
+          cat > "$HOME/.gradle/init.gradle" <<'GRADLE'
+          allprojects {
+              buildscript {
+                  repositories {
+                      maven {
+                          name = "MavenCentralMirror"
+                          url = uri("https://repo1.maven.org/maven2")
+                      }
+                  }
+              }
+
+              repositories {
+                  maven {
+                      name = "MavenCentralMirror"
+                      url = uri("https://repo1.maven.org/maven2")
+                  }
+              }
+          }
+          GRADLE
+
       - name: Build APK
         shell: bash
         run: |
           cd "$PROJECT_DIR"
-          gradle assembleDebug --no-daemon
+
+          for attempt in 1 2 3; do
+            echo "Build attempt $attempt of 3"
+
+            if gradle assembleDebug \
+              --no-daemon \
+              --refresh-dependencies \
+              --stacktrace; then
+              exit 0
+            fi
+
+            if [ "$attempt" -lt 3 ]; then
+              echo "Build failed. Retrying..."
+              sleep 15
+            fi
+          done
+
+          echo "ERROR: Build failed after 3 attempts"
+          exit 1
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: Astra-Android-APK
           path: ${{ env.PROJECT_DIR }}/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
